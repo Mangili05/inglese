@@ -9,7 +9,7 @@ st.set_page_config(page_title="Il Mio Diario Linguistico", page_icon="📝", lay
 
 # --- FUNZIONI DATABASE ---
 def init_db():
-    conn = sqlite3.connect('diario_voci.db', check_same_thread=False)
+    conn = sqlite3.connect('diario_voci_v2.db', check_same_thread=False)
     c = conn.cursor()
     # Aggiungiamo 'id' come chiave primaria per poter eliminare le righe facilmente
     c.execute('''CREATE TABLE IF NOT EXISTS dizionario 
