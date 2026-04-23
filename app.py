@@ -12,7 +12,7 @@ st.set_page_config(page_title="MyDiary", page_icon="📓", layout="centered")
 
 # --- DATABASE ---
 def init_db():
-    conn = sqlite3.connect('diario_v7.db', check_same_thread=False)
+    conn = sqlite3.connect('diario_v8.db', check_same_thread=False)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS dizionario 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, originale TEXT, traduzione_formattata TEXT, data TEXT, direzione TEXT)''')
@@ -22,11 +22,15 @@ def init_db():
 conn = init_db()
 c = conn.cursor()
 
-# --- LOGICA DI TRADUZIONE MIGLIORATA ---
-def get_clean_translation(word, direzione):
+# --- LOGICA DI TRADUZIONE "REVERSO" ---
+def get_reverso_style_translation(word, direzione):
     is_to_en = (direzione == "IT ➔ EN")
     
-    # Mapping etichette (EN, IT)
+    # Traduttori
+    translator_to_target = GoogleTranslator(source='it' if is_to_en else 'en', target='en' if is_to_en else 'it')
+    translator_back_to_source = GoogleTranslator(source='en' if is_to_en else 'it', target='it' if is_to_en else 'en')
+
+    # Mapping Etichette
     pos_map = {
         "adjective": ("adj.", "agg."),
         "noun": ("n.", "s."),
@@ -36,80 +40,80 @@ def get_clean_translation(word, direzione):
     idx = 0 if is_to_en else 1
 
     try:
-        # 1. TRADUZIONE PRINCIPALE
-        translator_main = GoogleTranslator(source='it' if is_to_en else 'en', target='en' if is_to_en else 'it')
-        main_translation = translator_main.translate(word).lower()
+        # 1. Traduzione principale
+        main_trans = translator_to_target.translate(word).lower()
         
-        # 2. RICERCA SINONIMI COMUNI
-        # Usiamo sempre la parola inglese per il dizionario
-        word_en = main_translation if is_to_en else word.lower()
+        # 2. Otteniamo dati dal dizionario sulla parola inglese
+        word_en = main_trans if is_to_en else word.lower()
         response = requests.get(f"https://api.dictionaryapi.dev/api/v2/entries/en/{word_en}")
         
-        final_results = []
+        final_entries = []
         
         if response.status_code == 200:
             data = response.json()[0]
-            # Prendiamo solo il PRIMO significato (di solito il più comune) per ogni categoria
             for meaning in data.get('meanings', []):
                 pos_raw = meaning.get('partOfSpeech', '')
-                if pos_raw not in pos_map: continue # Salta categorie strane
+                if pos_raw not in pos_map: continue # Salta roba strana o arcaica
                 
                 tag = pos_map[pos_raw][idx]
                 
-                # Lista di parole da processare (Parola principale + sinonimi del dizionario)
-                potential_words = [word_en] + meaning.get('synonyms', [])[:3]
+                # Prendiamo la parola principale e i sinonimi
+                candidates = [word_en] + meaning.get('synonyms', [])[:5]
                 
-                # Pulizia: teniamo solo parole singole ed evitiamo termini troppo lunghi/rari
-                potential_words = [w for w in potential_words if " " not in w and len(w) < 12]
-
-                for p_word in potential_words:
-                    if is_to_en:
-                        # Se andiamo verso l'inglese, salviamo la parola così com'è + tag
-                        display_word = p_word.capitalize()
-                    else:
-                        # Se andiamo verso l'italiano, dobbiamo tradurre i sinonimi inglesi
-                        display_word = GoogleTranslator(source='en', target='it').translate(p_word).capitalize()
+                for cand in candidates:
+                    cand = cand.lower()
+                    if " " in cand or len(cand) > 12: continue # Salta frasi composte o parole lunghissime
                     
-                    entry = f"{display_word} :blue[{tag}]"
-                    if entry not in final_results:
-                        final_results.append(entry)
+                    # --- FILTRO DI COERENZA (Back-Translation) ---
+                    # Traduciamo il candidato verso la lingua originale per vedere se il senso coincide
+                    back_trans = translator_back_to_source.translate(cand).lower()
+                    
+                    # Se il candidato tradotto non c'entra nulla con la parola originale, lo scartiamo
+                    # (Esempio: se 'Hefty' tradotto non dà 'Bello', sparisce)
+                    common_roots = [word[:4].lower(), "bell", "piac", "good", "nice", "fine"]
+                    if any(root in back_trans for root in common_roots) or word.lower() in back_trans:
+                        
+                        # Formattazione finale
+                        if is_to_en:
+                            display_word = cand.capitalize()
+                        else:
+                            # Se la direzione è EN->IT, la traduzione è quella di ritorno
+                            display_word = back_trans.capitalize()
+                        
+                        entry = f"{display_word} :blue[{tag}]"
+                        if entry not in final_entries:
+                            final_entries.append(entry)
                 
-                if len(final_results) >= 4: break # Non affolliamo troppo
-        
-        # Se il dizionario fallisce, restituisci almeno la traduzione base
-        if not final_results:
-            tag_fallback = ":blue[agg.]" if "bello" in word.lower() or "beautiful" in word.lower() else ""
-            return f"{main_translation.capitalize()} {tag_fallback}"
-            
-        return " / ".join(final_results[:4])
-        
-    except Exception as e:
-        return f"Errore: {str(e)}"
+                if len(final_entries) >= 4: break
 
-def get_tts_audio(text, lang='en'):
-    tts = gTTS(text=text, lang=lang)
-    audio_stream = io.BytesIO()
-    tts.write_to_fp(audio_stream)
-    return audio_stream.getvalue()
+        # Fallback se il dizionario è troppo vuoto
+        if not final_entries:
+            return f"{main_trans.capitalize()} :blue[{'adj.' if is_to_en else 'agg.'}]"
+
+        return " / ".join(final_entries[:4])
+
+    except:
+        return translator_to_target.translate(word).capitalize()
 
 # --- INTERFACCIA ---
 st.title("📓 MyDiary")
 
-col_in1, col_in2 = st.columns([2, 1])
-with col_in2:
-    direzione = st.radio("Direzione:", ("IT ➔ EN", "EN ➔ IT"))
-with col_in1:
-    parola_input = st.text_input("Inserisci termine:").strip()
+with st.container():
+    col_in1, col_in2 = st.columns([2, 1])
+    with col_in2:
+        direzione = st.radio("Direzione:", ("IT ➔ EN", "EN ➔ IT"))
+    with col_in1:
+        parola_input = st.text_input("Parola da tradurre:").strip()
 
-if st.button("Traduci e Salva", use_container_width=True):
-    if parola_input:
-        with st.spinner("Traduzione in corso..."):
-            output = get_clean_translation(parola_input, direzione)
-            data_oggi = datetime.now().strftime("%d/%m/%Y")
-            c.execute("INSERT INTO dizionario (originale, traduzione_formattata, data, direzione) VALUES (?, ?, ?, ?)",
-                      (parola_input, output, data_oggi, direzione))
-            conn.commit()
-            st.rerun()
+    if st.button("Traduci e Salva", use_container_width=True):
+        if parola_input:
+            with st.spinner("Analisi sinonimi in corso..."):
+                output = get_reverso_style_translation(parola_input, direzione)
+                data_oggi = datetime.now().strftime("%d/%m/%Y")
+                c.execute("INSERT INTO dizionario (originale, traduzione_formattata, data, direzione) VALUES (?, ?, ?, ?)",
+                          (parola_input, output, data_oggi, direzione))
+                conn.commit()
+                st.rerun()
 
 st.divider()
 
@@ -122,10 +126,10 @@ if not df.empty:
         with st.container():
             c1, c2, c3 = st.columns([1, 6, 1])
             with c1:
-                # Logica audio: legge la versione inglese
-                audio_text = row['traduzione_formattata'].split(' :')[0] if row['direzione'] == "IT ➔ EN" else row['originale']
+                # Audio: legge la parte inglese
+                text_to_read = row['traduzione_formattata'].split(' :')[0] if row['direzione'] == "IT ➔ EN" else row['originale']
                 if st.button("🔊", key=f"aud_{row['id']}"):
-                    audio_placeholder.audio(get_tts_audio(audio_text), format="audio/mp3", autoplay=True)
+                    audio_placeholder.audio(gTTS(text=text_to_read, lang='en').get_urls()[0], format="audio/mp3", autoplay=True)
             with c2:
                 st.markdown(f"**{row['originale'].capitalize()}**")
                 st.markdown(row['traduzione_formattata'])
