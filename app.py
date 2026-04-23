@@ -7,50 +7,69 @@ import requests
 from datetime import datetime
 import pandas as pd
 
-# --- CONFIGURAZIONE PAGINA ---
+# --- CONFIGURAZIONE ---
 st.set_page_config(page_title="MyDiary", page_icon="📓", layout="centered")
 
-# --- FUNZIONI DATABASE ---
+# CSS personalizzato per rendere l'interfaccia ancora più simile a un'app
+st.markdown("""
+    <style>
+    .pos-tag { color: #2e76d2; font-weight: bold; font-size: 0.8em; }
+    .stButton>button { border-radius: 20px; }
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- DATABASE ---
 def init_db():
-    conn = sqlite3.connect('diario_voci_v5.db', check_same_thread=False)
+    conn = sqlite3.connect('diario_reverso_v1.db', check_same_thread=False)
     c = conn.cursor()
-    # Salviamo i dettagli già formattati come stringa nel DB
     c.execute('''CREATE TABLE IF NOT EXISTS dizionario 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, inglese TEXT, italiano TEXT, dettagli TEXT, data TEXT)''')
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, originale TEXT, traduzione_formattata TEXT, data TEXT, direzione TEXT)''')
     conn.commit()
     return conn
 
 conn = init_db()
 c = conn.cursor()
 
-# --- LOGICA DI TRADUZIONE E SINONIMI ---
-def get_enhanced_details(word_en):
-    """Recupera sinonimi in inglese e li traduce in italiano raggruppandoli per tipo"""
+# --- LOGICA DI TRADUZIONE REVERSO-STYLE ---
+def get_pos_and_alternatives(word_en, is_to_en=True):
+    """
+    Recupera categoria grammaticale e alternative.
+    is_to_en=True significa che la traduzione è in inglese (usa adj., v.)
+    is_to_en=False significa che la traduzione è in italiano (usa agg., v., s.)
+    """
+    pos_map = {
+        "adjective": ("adj.", "agg."),
+        "verb": ("v.", "v."),
+        "noun": ("n.", "s."),
+        "adverb": ("adv.", "avv.")
+    }
+    
     try:
         response = requests.get(f"https://api.dictionaryapi.dev/api/v2/entries/en/{word_en}")
-        if response.status_code != 200:
-            return ""
+        if response.status_code != 200: return ""
         
         data = response.json()[0]
-        translator_to_it = GoogleTranslator(source='en', target='it')
-        all_info = []
-
-        for meaning in data.get('meanings', []):
-            part_of_speech = meaning.get('partOfSpeech', 'altro')
-            synonyms_en = meaning.get('synonyms', [])[:3] # Prendiamo i primi 3
-            
-            if synonyms_en:
-                pairs = []
-                for syn in synonyms_en:
-                    # Traduciamo il sinonimo inglese in italiano
-                    syn_it = translator_to_it.translate(syn)
-                    pairs.append(f"{syn} ➔ {syn_it}")
-                
-                # Formattazione: [verb] produce ➔ produrre, make ➔ fare
-                info_line = f"**{part_of_speech}**: {', '.join(pairs)}"
-                all_info.append(info_line)
+        results = []
         
-        return "  \n".join(all_info) # Ritorna le righe separate da a capo
+        # Estraiamo la parola principale e i sinonimi raggruppati per POS
+        for meaning in data.get('meanings', []):
+            pos_raw = meaning.get('partOfSpeech', '')
+            # Scegliamo l'abbreviazione giusta (EN o IT)
+            idx = 0 if is_to_en else 1
+            tag = pos_map.get(pos_raw, (f"{pos_raw}.", f"{pos_raw}."))[idx]
+            
+            # Prendiamo la parola stessa + 2 sinonimi per quel POS
+            syns = [word_en] + meaning.get('synonyms', [])[:2]
+            
+            # Se stiamo traducendo verso l'italiano, dobbiamo tradurre anche i sinonimi
+            if not is_to_en:
+                translator = GoogleTranslator(source='en', target='it')
+                syns = [translator.translate(s) for s in syns]
+            
+            for s in list(dict.fromkeys(syns)): # Rimuove duplicati
+                results.append(f"{s} :blue[{tag}]")
+        
+        return " / ".join(results[:4]) # Limitiamo a 4 risultati totali
     except:
         return ""
 
@@ -60,64 +79,66 @@ def get_tts_audio(text, lang='en'):
     tts.write_to_fp(audio_stream)
     return audio_stream.getvalue()
 
-# --- INTERFACCIA UTENTE ---
+# --- INTERFACCIA ---
 st.title("📓 MyDiary")
-st.markdown("---")
 
-# Input
+# Inserimento
 with st.container():
     col_in1, col_in2 = st.columns([2, 1])
     with col_in2:
         direzione = st.radio("Direzione:", ("IT ➔ EN", "EN ➔ IT"))
     with col_in1:
-        parola_input = st.text_input("Inserisci termine da imparare:").strip()
+        parola_input = st.text_input("Inserisci termine:").strip()
 
-    if st.button("Traduci e Salva nel Diario", use_container_width=True):
+    if st.button("Traduci e Salva", use_container_width=True):
         if parola_input:
-            with st.spinner("Ricerca sinonimi e traduzione in corso..."):
+            with st.spinner("Elaborazione in corso..."):
                 try:
-                    # Direzione traduzione
                     if direzione == "IT ➔ EN":
-                        word_it = parola_input
-                        word_en = GoogleTranslator(source='it', target='en').translate(parola_input)
+                        # Traduciamo l'input in EN per interrogare il dizionario
+                        main_trans = GoogleTranslator(source='it', target='en').translate(parola_input)
+                        output_formattato = get_pos_and_alternatives(main_trans, is_to_en=True)
+                        lingua_audio = main_trans
                     else:
-                        word_en = parola_input
-                        word_it = GoogleTranslator(source='en', target='it').translate(parola_input)
+                        # L'input è già EN
+                        output_formattato = get_pos_and_alternatives(parola_input, is_to_en=False)
+                        lingua_audio = parola_input
                     
-                    # Recupero sinonimi accoppiati (sempre basandosi sulla parola inglese)
-                    dettagli = get_enhanced_details(word_en.lower())
-                    
+                    # Se il dizionario non trova nulla, mettiamo almeno la traduzione base
+                    if not output_formattato:
+                        base = GoogleTranslator(source='it' if direzione=="IT ➔ EN" else 'en', 
+                                                target='en' if direzione=="IT ➔ EN" else 'it').translate(parola_input)
+                        output_formattato = base
+
                     data_oggi = datetime.now().strftime("%d/%m/%Y")
-                    
-                    c.execute("INSERT INTO dizionario (inglese, italiano, dettagli, data) VALUES (?, ?, ?, ?)",
-                              (word_en.lower(), word_it.lower(), dettagli, data_oggi))
+                    c.execute("INSERT INTO dizionario (originale, traduzione_formattata, data, direzione) VALUES (?, ?, ?, ?)",
+                              (parola_input, output_formattato, data_oggi, direzione))
                     conn.commit()
-                    st.success(f"Aggiunto: {word_it} = {word_en}")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Errore: {e}")
 
-st.markdown("### 📚 Le tue parole")
+st.markdown("---")
 
-# Visualizzazione
+# Visualizzazione Diario
 audio_placeholder = st.empty()
 df = pd.read_sql_query("SELECT * FROM dizionario ORDER BY id DESC", conn)
 
 if not df.empty:
     for index, row in df.iterrows():
-        # Container per ogni parola per pulizia visiva
         with st.container():
             c1, c2, c3 = st.columns([1, 6, 1])
             
             with c1:
+                # Per l'audio: se IT->EN la parola inglese è la traduzione, altrimenti è l'originale
+                text_for_audio = row['traduzione_formattata'].split(' :')[0] if row['direzione'] == "IT ➔ EN" else row['originale']
                 if st.button("🔊", key=f"audio_{row['id']}"):
-                    audio_bytes = get_tts_audio(row['inglese'])
+                    audio_bytes = get_tts_audio(text_for_audio)
                     audio_placeholder.audio(audio_bytes, format="audio/mp3", autoplay=True)
             
             with c2:
-                st.markdown(f"**{row['inglese'].upper()}** ⟷ *{row['italiano'].capitalize()}*")
-                if row['dettagli']:
-                    st.info(row['dettagli'])
+                st.markdown(f"**{row['originale'].capitalize()}**")
+                st.markdown(row['traduzione_formattata'])
             
             with c3:
                 if st.button("🗑️", key=f"del_{row['id']}"):
@@ -125,5 +146,3 @@ if not df.empty:
                     conn.commit()
                     st.rerun()
             st.markdown("---")
-else:
-    st.info("Il diario è vuoto. Inserisci la prima parola qui sopra!")
