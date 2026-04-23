@@ -11,7 +11,7 @@ st.set_page_config(page_title="MyDiary", page_icon="📓", layout="centered")
 
 # --- DATABASE ---
 def init_db():
-    conn = sqlite3.connect('my_diary_simple.db', check_same_thread=False)
+    conn = sqlite3.connect('my_diary_final.db', check_same_thread=False)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS dizionario 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, originale TEXT, traduzione TEXT, data TEXT, direzione TEXT)''')
@@ -21,12 +21,19 @@ def init_db():
 conn = init_db()
 c = conn.cursor()
 
-# --- FUNZIONE AUDIO ---
-def get_tts_audio(text):
-    tts = gTTS(text=text, lang='en')
-    audio_stream = io.BytesIO()
-    tts.write_to_fp(audio_stream)
-    return audio_stream.getvalue()
+# --- LOGICA TRADUZIONE ---
+def get_smart_translation(text, direzione):
+    src = 'it' if direzione == "IT ➔ EN" else 'en'
+    tgt = 'en' if direzione == "IT ➔ EN" else 'it'
+    
+    # 1. Traduzione principale (la più affidabile)
+    main_trans = GoogleTranslator(source=src, target=tgt).translate(text)
+    
+    # 2. Per simulare la lista di Google, proviamo a chiedere traduzioni alternative
+    # Nota: GoogleTranslator restituisce una stringa, ma possiamo fargli tradurre 
+    # piccoli termini correlati o semplicemente tenerlo pulito con le 2/3 varianti principali
+    # se disponibili. In questa versione puntiamo alla precisione del termine principale.
+    return main_trans.capitalize()
 
 # --- INTERFACCIA ---
 st.title("📓 MyDiary")
@@ -36,19 +43,16 @@ with st.container():
     with col_in2:
         direzione = st.radio("Direzione:", ("IT ➔ EN", "EN ➔ IT"))
     with col_in1:
-        parola_input = st.text_input("Inserisci parola:").strip()
+        parola_input = st.text_input("Inserisci termine:").strip()
 
     if st.button("Traduci e Salva", use_container_width=True):
         if parola_input:
             try:
-                src = 'it' if direzione == "IT ➔ EN" else 'en'
-                tgt = 'en' if direzione == "IT ➔ EN" else 'it'
-                
-                traduzione = GoogleTranslator(source=src, target=tgt).translate(parola_input)
+                traduzione = get_smart_translation(parola_input, direzione)
                 data_oggi = datetime.now().strftime("%d/%m/%Y")
                 
                 c.execute("INSERT INTO dizionario (originale, traduzione, data, direzione) VALUES (?, ?, ?, ?)",
-                          (parola_input.capitalize(), traduzione.capitalize(), data_oggi, direzione))
+                          (parola_input.capitalize(), traduzione, data_oggi, direzione))
                 conn.commit()
                 st.rerun()
             except Exception as e:
@@ -57,31 +61,35 @@ with st.container():
 st.divider()
 
 # --- VISUALIZZAZIONE DIARIO ---
-audio_placeholder = st.empty()
 df = pd.read_sql_query("SELECT * FROM dizionario ORDER BY id DESC", conn)
 
 if not df.empty:
     for index, row in df.iterrows():
+        # Creiamo un "box" per ogni parola
         with st.container():
-            c1, c2, c3 = st.columns([1, 6, 1])
+            col_a, col_b, col_c = st.columns([1, 6, 1])
             
-            with c1:
-                # L'audio legge sempre la parte inglese
+            # Colonna Sinistra: Audio
+            with col_a:
                 testo_audio = row['traduzione'] if row['direzione'] == "IT ➔ EN" else row['originale']
                 if st.button("🔊", key=f"aud_{row['id']}"):
-                    audio_bytes = get_tts_audio(testo_audio)
-                    audio_placeholder.audio(audio_bytes, format="audio/mp3", autoplay=True)
+                    tts = gTTS(text=testo_audio, lang='en')
+                    audio_fp = io.BytesIO()
+                    tts.write_to_fp(audio_fp)
+                    st.audio(audio_fp, format="audio/mp3", autoplay=True)
             
-            with c2:
-                st.markdown(f"**{row['originale']}** \n{row['traduzione']}")
-                st.caption(f"🗓️ {row['data']}")
+            # Colonna Centrale: Testo
+            with col_b:
+                st.markdown(f"**{row['originale']}**")
+                st.write(row['traduzione'])
+                st.caption(row['data'])
             
-            with c3:
-                # Tasto elimina accanto alla parola
+            # Colonna Destra: Elimina
+            with col_c:
                 if st.button("🗑️", key=f"del_{row['id']}"):
                     c.execute("DELETE FROM dizionario WHERE id = ?", (row['id'],))
                     conn.commit()
                     st.rerun()
             st.divider()
 else:
-    st.info("Il tuo diario è vuoto. Inserisci una parola per iniziare!")
+    st.info("Il diario è vuoto.")
